@@ -64,6 +64,9 @@ setup(
     install_requires=[
         'scipy>=0.16',
     ],
+    extras_require={
+        'progress': ['progressbar2'],
+    },
     ext_modules=[
         cython_ext(Extension('mmd._mmd',
                              ['mmd/_mmd.pyx'],
