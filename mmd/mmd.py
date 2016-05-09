@@ -28,11 +28,13 @@ def rbf_mmk(samps, gamma, n_jobs=1):
         stacked, n_samps, gamma, n_jobs,
         ProgressLogger(progress_logger, name="RBF mean map kernel"))
 
-def rbf_mmd(samps, gamma, n_jobs=1):
+def rbf_mmd(samps, gamma, squared=False, n_jobs=1):
     K = rbf_mmk(samps, gamma, n_jobs=n_jobs)
     diag = np.diagonal(K).copy()
     K *= -2
     K += diag[:, None]
     K += diag[None, :]
+    if not squared:
+        np.sqrt(K, out=K)
     return K
 
