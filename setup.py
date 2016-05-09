@@ -62,7 +62,6 @@ setup(
     ],
     description="Some utilities for dealing with the Maximum Mean Discrepancy (MMD) and related tools",
     install_requires=[
-        'scikit-learn>=0.16',
         'scipy>=0.16',
     ],
     ext_modules=[

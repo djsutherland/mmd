@@ -3,7 +3,7 @@ from __future__ import division
 import numpy as np
 from cython cimport boundscheck, floating
 from cython.parallel import prange, threadid
-from sklearn.utils import _get_n_jobs
+from .utils import _get_n_jobs
 
 cdef extern from "math.h":
     double exp(double x) nogil
