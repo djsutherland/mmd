@@ -1,8 +1,10 @@
 from __future__ import division
 
-import numpy as np
-from cython cimport boundscheck, floating
+from cython cimport boundscheck, floating, wraparound
 from cython.parallel import prange, threadid
+from cpython.exc cimport PyErr_CheckSignals
+
+import numpy as np
 from .utils import _get_n_jobs
 
 cdef extern from "math.h":
@@ -14,8 +16,9 @@ cimport scipy.linalg.cython_lapack as lapack
 
 
 @boundscheck(False)
+@wraparound(False)
 cpdef _rbf_mmk(floating[:, ::1] stacked, int[::1] n_samps,
-               floating gamma, int n_jobs):
+               floating gamma, int n_jobs, log_progress):
     cdef object float_t = np.float32 if floating is float else np.float64
     n_jobs = _get_n_jobs(n_jobs)
   
@@ -47,6 +50,15 @@ cpdef _rbf_mmk(floating[:, ::1] stacked, int[::1] n_samps,
     cdef int num_prod, job_i, tid
     cdef floating inc
 
+    cdef object pbar = log_progress
+    cdef bint do_progress = bool(pbar)
+    cdef long jobs_since_last_tick_val
+    cdef long * jobs_since_last_tick = &jobs_since_last_tick_val
+    cdef long[::1] num_done  # total things done by each thread
+    if do_progress:
+        num_done = np.zeros(n_jobs, dtype=np.int64)
+        pbar.start(total=n ** 2)
+
     with nogil:
         for job_i in prange(n ** 2, num_threads=n_jobs, schedule='static'):
             i = job_i // n
@@ -62,6 +74,12 @@ cpdef _rbf_mmk(floating[:, ::1] stacked, int[::1] n_samps,
             num_j = j_end - j_start
           
             num_prod = num_i * num_j
+
+            if tid == 0:
+                with gil:
+                    PyErr_CheckSignals()  # allow ^C to interrupt us
+                if do_progress:
+                    handle_pbar(pbar, jobs_since_last_tick, num_done)
 
             # TODO: avoid code duplication here...
             # TODO: support other kernels
@@ -122,4 +140,26 @@ cpdef _rbf_mmk(floating[:, ::1] stacked, int[::1] n_samps,
                         K[i, j] += inc
               
                 K[i, j] /= num_prod
+
+            if do_progress:
+                num_done[tid] += 1
+
+    if do_progress:
+        pbar.finish()
     return np.asarray(K)
+
+
+@boundscheck(False)
+@wraparound(False)
+cdef bint handle_pbar(object pbar, long * jobs_since_last_tick,
+                      long[::1] num_done) nogil except 1:
+    jobs_since_last_tick[0] += 1
+    cdef long done_count = 0
+
+    if jobs_since_last_tick[0] >= 20:  # TODO: tweak? do it based on time?
+        for k in range(num_done.shape[0]):
+            done_count += num_done[k]
+
+        with gil:
+            pbar.update(done_count)
+        jobs_since_last_tick[0] = 0
