@@ -187,15 +187,16 @@ cdef floating _mean_rbf_kernel(
     cdef int i, j
 
     # put  -2 X Y^T  into tmp
+    # X, Y are stored as row-major feature arrays; blas expects col-major
     if floating is float:
-        blas.sgemm('N', 'T', &num_X, &num_Y, &dim, &minus_two_f,
-                   &X[0, 0], &num_X,
-                   &Y[0, 0], &num_Y,
+        blas.sgemm('T', 'N', &num_X, &num_Y, &dim, &minus_two_f,
+                   &X[0, 0], &dim,
+                   &Y[0, 0], &dim,
                    &zero_f, &tmp[0], &num_X)
     else:
-        blas.dgemm('N', 'T', &num_X, &num_Y, &dim, &minus_two_f,
-                   &X[0, 0], &num_X,
-                   &Y[0, 0], &num_Y,
+        blas.dgemm('T', 'N', &num_X, &num_Y, &dim, &minus_two_f,
+                   &X[0, 0], &dim,
+                   &Y[0, 0], &dim,
                    &zero_f, &tmp[0], &num_X)
 
     # add row norms - NOTE: not vectorized...
