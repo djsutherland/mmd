@@ -35,11 +35,16 @@ def rbf_mmk(X, Y=None, gamma=1, n_jobs=1, subsample_gamma=1000,
         Y_n_samps = np.array([len(y) for y in Y], dtype=np.int32)
         X_is_Y = False
 
+    if all(isinstance(h, logging.NullHandler)
+            for h in progress_logger.handlers):
+        log_obj = None # don't send progress messages that'll just be dropped
+    else:
+        log_obj = ProgressLogger(progress_logger, name="RBF mean map kernel")
+
     return _rbf_mmk(
         X_stacked, X_n_samps, Y_stacked, Y_n_samps, gamma, n_jobs,
-        ProgressLogger(progress_logger, name="RBF mean map kernel"),
-        X_is_Y, get_X_diag, get_Y_diag)
-    # TODO: if there's no non-null handler attached, don't send a logger obj
+        log_obj, X_is_Y, get_X_diag, get_Y_diag)
+
 
 def rbf_mmd(X, Y=None, gamma=1, squared=False, n_jobs=1, subsample_gamma=1000,
             X_diag=None, Y_diag=None):
