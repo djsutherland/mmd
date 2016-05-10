@@ -15,13 +15,12 @@ cimport scipy.linalg.cython_blas as blas
 cimport scipy.linalg.cython_lapack as lapack
 
 # TODO: support other kernels
-# TODO: support computing multiple gammas at once
 
 @boundscheck(False)
 @wraparound(False)
 def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
              floating[:, ::1] Y_stacked not None, int[::1] Y_n_samps not None,
-             floating gamma, int n_jobs, log_progress,
+             floating[::1] gammas, int n_jobs, log_progress,
              bint X_is_Y, bint get_X_diag, bint get_Y_diag):
     # NOTE: use longs for indices in the number of bags and especially the
     #       product of the number of bags, since that actually might overflow
@@ -30,6 +29,9 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
     cdef object float_t = np.float32 if floating is float else np.float64
     n_jobs = _get_n_jobs(n_jobs)
     cdef long i, j
+
+    cdef int n_gammas = gammas.shape[0]
+    cdef floating[::1] minus_gammas = -np.asarray(gammas)
 
     cdef long X_n = X_n_samps.shape[0]
     cdef long X_N = X_stacked.shape[0]
@@ -67,8 +69,8 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
     cdef floating[:, ::1] tmps = np.empty(
             (n_jobs, max_pts * max_pts), dtype=float_t)
 
-    cdef floating[:, ::1] K = np.empty((X_n, Y_n), dtype=float_t)
-    cdef floating[::1] X_diag, Y_diag
+    cdef floating[:, :, ::1] K = np.empty((n_gammas, X_n, Y_n), dtype=float_t)
+    cdef floating[:, ::1] X_diag, Y_diag
 
     cdef long num_main_jobs
     cdef long[::1] main_job_is, main_job_js
@@ -82,10 +84,10 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
     cdef long total_to_do = num_main_jobs
     if not X_is_Y:
         if get_X_diag:
-            X_diag = np.empty(X_n, dtype=float_t)
+            X_diag = np.empty((n_gammas, X_n), dtype=float_t)
             total_to_do += X_n
         if get_Y_diag:
-            Y_diag = np.empty(Y_n, dtype=float_t)
+            Y_diag = np.empty((n_gammas, Y_n), dtype=float_t)
             total_to_do += Y_n
 
     cdef object pbar = log_progress
@@ -98,7 +100,6 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
         pbar.start(total=total_to_do)
 
     cdef long job_idx, tid, i_start, i_end, j_start, j_end
-    cdef floating minus_gamma = -gamma
     with nogil:
         for job_idx in prange(total_to_do, num_threads=n_jobs,
                               schedule='static'):
@@ -121,38 +122,41 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
                 j_start = Y_bounds[j]
                 j_end = Y_bounds[j + 1]
 
-                K[i, j] = _mean_rbf_kernel(
+                _mean_rbf_kernel[floating](
                     X_stacked[i_start:i_end, :],
                     Y_stacked[j_start:j_end, :],
                     XXs_stacked[i_start:i_end],
                     YYs_stacked[j_start:j_end],
-                    minus_gamma, tmps[tid, :])
+                    minus_gammas, tmps[tid, :],
+                    K[:, i, j])
 
                 if X_is_Y:
-                    K[j, i] = K[i, j]
+                    K[:, j, i] = K[:, i, j]
 
             else:
                 i = job_idx - num_main_jobs
                 if get_X_diag and i < X_n:
                     i_start = X_bounds[i]
                     i_end = X_bounds[i + 1]
-                    X_diag[i] = _mean_rbf_kernel(
+                    _mean_rbf_kernel[floating](
                         X_stacked[i_start:i_end, :],
                         X_stacked[i_start:i_end, :],
                         XXs_stacked[i_start:i_end],
                         XXs_stacked[i_start:i_end],
-                        minus_gamma, tmps[tid, :])
+                        minus_gammas, tmps[tid, :],
+                        X_diag[:, i])
                 else:
                     if get_X_diag:
                         i = i - X_n
                     i_start = Y_bounds[i]
                     i_end = Y_bounds[i + 1]
-                    Y_diag[i] = _mean_rbf_kernel(
+                    _mean_rbf_kernel[floating](
                         Y_stacked[i_start:i_end, :],
                         Y_stacked[i_start:i_end, :],
                         YYs_stacked[i_start:i_end],
                         YYs_stacked[i_start:i_end],
-                        minus_gamma, tmps[tid, :])
+                        minus_gammas, tmps[tid, :],
+                        Y_diag[:, i])
 
             if do_progress:
                 num_done[tid] += 1
@@ -162,7 +166,7 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
 
     if get_X_diag or get_Y_diag:
         if X_is_Y:
-            X_diag = Y_diag = np.diagonal(K).copy()
+            X_diag = Y_diag = np.asarray(K)[:, xrange(X_n), xrange(X_n)].copy()
 
         ret = (np.asarray(K),)
         if get_X_diag:
@@ -176,15 +180,17 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
 
 @boundscheck(False)
 @wraparound(False)
-cdef floating _mean_rbf_kernel(
+cdef void _mean_rbf_kernel(
             floating[:, ::1] X, floating[:, ::1] Y,
             floating[::1] XX, floating[::1] YY,
-            floating minus_gamma, floating[::1] tmp) nogil:
+            floating[::1] minus_gammas, floating[::1] tmp,
+            floating[:] out) nogil:
     cdef int num_X = X.shape[0], num_Y = Y.shape[0], dim = X.shape[1]
     cdef int num_prod = num_X * num_Y
+    cdef int n_gammas = minus_gammas.shape[0]
     cdef floating zero_f = 0, minus_two_f = -2
-    cdef int one_i = 1
-    cdef int i, j
+    cdef int i, j, k
+    cdef floating t
 
     # put  -2 X Y^T  into tmp
     # X, Y are stored as row-major feature arrays; blas expects col-major
@@ -199,26 +205,19 @@ cdef floating _mean_rbf_kernel(
                    &Y[0, 0], &dim,
                    &zero_f, &tmp[0], &num_X)
 
-    # add row norms - NOTE: not vectorized...
+    # do the rest of it
+    # TODO: would explicitly vectorizing this help?
     for i in range(num_X):
         for j in range(num_Y):
-            tmp[i + num_X * j] += XX[i] + YY[j]
+            t = tmp[i + num_X * j] + XX[i] + YY[j]
 
-    # scale by -gamma
-    if floating is float:
-        blas.sscal(&num_prod, &minus_gamma, &tmp[0], &one_i)
-    else:
-        blas.dscal(&num_prod, &minus_gamma, &tmp[0], &one_i)
-
-    # exponentiate and mean - NOTE: not vectorized...
-    cdef floating res = 0
-    for i in range(num_X):
-        for j in range(num_Y):
-            if floating is float:
-                res += expf(tmp[i + num_X * j])
-            else:
-                res += exp(tmp[i + num_X * j])
-    return res / num_prod
+            for k in range(n_gammas):
+                if floating is float:
+                    out[k] += expf(minus_gammas[k] * t)
+                else:
+                    out[k] += exp(minus_gammas[k] * t)
+    for k in range(n_gammas):
+        out[k] /= num_prod
 
 
 @boundscheck(False)
