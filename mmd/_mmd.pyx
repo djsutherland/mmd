@@ -182,27 +182,21 @@ cdef floating _mean_rbf_kernel(
             floating minus_gamma, floating[::1] tmp) nogil:
     cdef int num_X = X.shape[0], num_Y = Y.shape[0], dim = X.shape[1]
     cdef int num_prod = num_X * num_Y
-    cdef floating one_f = 1, zero_f = 0, minus_two_f = -2
+    cdef floating zero_f = 0, minus_two_f = -2
     cdef int one_i = 1
     cdef int i, j
 
-    # put  X Y^T  into tmp
+    # put  -2 X Y^T  into tmp
     if floating is float:
-        blas.sgemm('N', 'T', &num_X, &num_Y, &dim, &one_f,
+        blas.sgemm('N', 'T', &num_X, &num_Y, &dim, &minus_two_f,
                    &X[0, 0], &num_X,
                    &Y[0, 0], &num_Y,
                    &zero_f, &tmp[0], &num_X)
     else:
-        blas.dgemm('N', 'T', &num_X, &num_Y, &dim, &one_f,
+        blas.dgemm('N', 'T', &num_X, &num_Y, &dim, &minus_two_f,
                    &X[0, 0], &num_X,
                    &Y[0, 0], &num_Y,
                    &zero_f, &tmp[0], &num_X)
-
-    # scale by -2
-    if floating is float:
-        blas.sscal(&num_prod, &minus_two_f, &tmp[0], &one_i)
-    else:
-        blas.dscal(&num_prod, &minus_two_f, &tmp[0], &one_i)
 
     # add row norms - NOTE: not vectorized...
     for i in range(num_X):
