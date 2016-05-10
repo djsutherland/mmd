@@ -21,19 +21,47 @@ def plog(it, name=None, total=None):
 ################################################################################
 ### Actual functions
 
-def rbf_mmk(samps, gamma, n_jobs=1):
-    stacked = np.vstack(samps)
-    n_samps = np.array([len(x) for x in samps], dtype=np.int32)
-    return _rbf_mmk(
-        stacked, n_samps, gamma, n_jobs,
-        ProgressLogger(progress_logger, name="RBF mean map kernel"))
+def rbf_mmk(X, Y=None, gamma=1, n_jobs=1, subsample_gamma=1000,
+            get_X_diag=False, get_Y_diag=False):
+    X_stacked = np.vstack(X)
+    X_n_samps = np.array([len(x) for x in X], dtype=np.int32)
 
-def rbf_mmd(samps, gamma, squared=False, n_jobs=1):
-    K = rbf_mmk(samps, gamma, n_jobs=n_jobs)
-    diag = np.diagonal(K).copy()
+    if Y is None or Y is X:
+        Y_stacked = X_stacked
+        Y_n_samps = X_n_samps
+        X_is_Y = True
+    else:
+        Y_stacked = np.vstack(Y)
+        Y_n_samps = np.array([len(y) for y in Y], dtype=np.int32)
+        X_is_Y = False
+
+    return _rbf_mmk(
+        X_stacked, X_n_samps, Y_stacked, Y_n_samps, gamma, n_jobs,
+        ProgressLogger(progress_logger, name="RBF mean map kernel"),
+        X_is_Y, get_X_diag, get_Y_diag)
+    # TODO: if there's no non-null handler attached, don't send a logger obj
+
+def rbf_mmd(X, Y=None, gamma=1, squared=False, n_jobs=1, subsample_gamma=1000,
+            X_diag=None, Y_diag=None):
+    if Y is None or Y is X:
+        K = rbf_mmk(X, None, gamma, n_jobs=n_jobs,
+                    subsample_gamma=subsample_gamma)
+        X_diag = Y_diag = np.diagonal(K).copy()
+    else:
+        get_X_diag = X_diag is None
+        get_Y_diag = Y_diag is None
+        res = rbf_mmk(X, Y, gamma, n_jobs=n_jobs,
+                      subsample_gamma=subsample_gamma,
+                      get_X_diag=get_X_diag, get_Y_diag=get_Y_diag)
+        K = res[0]
+        if X_diag is None:
+            X_diag = res[1]
+        if Y_diag is None:
+            Y_diag = res[-1]
+
     K *= -2
-    K += diag[:, None]
-    K += diag[None, :]
+    K += X_diag[:, None]
+    K += Y_diag[None, :]
     if not squared:
         np.sqrt(K, out=K)
     return K

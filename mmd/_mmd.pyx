@@ -1,4 +1,4 @@
-from __future__ import division
+from __future__ import division, print_function
 
 from cython cimport boundscheck, floating, wraparound
 from cython.parallel import prange, threadid
@@ -11,44 +11,82 @@ cdef extern from "math.h":
     double exp(double x) nogil
     float expf(float x) nogil
 
-cimport scipy.linalg.cython_blas as blas 
-cimport scipy.linalg.cython_lapack as lapack 
+cimport scipy.linalg.cython_blas as blas
+cimport scipy.linalg.cython_lapack as lapack
 
+# TODO: support other kernels
+# TODO: support computing multiple gammas at once
 
 @boundscheck(False)
 @wraparound(False)
-cpdef _rbf_mmk(floating[:, ::1] stacked, int[::1] n_samps,
-               floating gamma, int n_jobs, log_progress):
+def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
+             floating[:, ::1] Y_stacked not None, int[::1] Y_n_samps not None,
+             floating gamma, int n_jobs, log_progress,
+             bint X_is_Y, bint get_X_diag, bint get_Y_diag):
+    # NOTE: use longs for indices in the number of bags and especially the
+    #       product of the number of bags, since that actually might overflow
+    #       an int -- but use ints for the number of samples per bag (and their
+    #       product), since the BLAS interface only works with ints
     cdef object float_t = np.float32 if floating is float else np.float64
     n_jobs = _get_n_jobs(n_jobs)
-  
-    cdef int n = n_samps.shape[0]
-    cdef int N = stacked.shape[0]
-    cdef int d = stacked.shape[1]
-    cdef int[::1] bounds = np.r_[0, np.cumsum(n_samps)].astype(np.int32)
-    cdef int i, j, k, l
+    cdef long i, j
 
-    cdef floating[:, ::1] K = np.empty((n, n), dtype=float_t)
+    cdef long X_n = X_n_samps.shape[0]
+    cdef long X_N = X_stacked.shape[0]
+    cdef int d = X_stacked.shape[1]
+    cdef long[::1] X_bounds = np.r_[0, np.cumsum(X_n_samps)]
 
-    # allocate work buffer for each thread
-    cdef int max_pts = np.max(n_samps)
-    cdef floating[:, ::1] tmps = np.empty(
-            (n_jobs, max_pts * max_pts), dtype=float_t)
-  
-    cdef floating[::1] XXs_stacked = np.empty(N, dtype=float_t)
-    for i in range(N):
+    cdef floating[::1] XXs_stacked = np.empty(X_N, dtype=float_t)
+    for i in range(X_N):
         XXs_stacked[i] = 0
         for j in range(d):
-            XXs_stacked[i] += stacked[i, j] ** 2
-  
-    cdef int one_i = 1
-    cdef floating zero_f = 0, one_f = 1, minus_two_f = -2
-    cdef floating minus_gamma = -gamma
+            XXs_stacked[i] += X_stacked[i, j] ** 2
 
-    cdef int i_start, i_end, num_i
-    cdef int j_start, j_end, num_j
-    cdef int num_prod, job_i, tid
-    cdef floating inc
+    cdef long Y_n, Y_N
+    cdef long[::1] Y_bounds
+    cdef floating[::1] YYs_stacked
+
+    if X_is_Y:
+        Y_n = X_n
+        Y_N = X_N
+        Y_bounds = X_bounds
+        YYs_stacked = XXs_stacked
+    else:
+        Y_n = Y_n_samps.shape[0]
+        Y_N = Y_stacked.shape[0]
+        assert Y_stacked.shape[1] == d
+        Y_bounds = np.r_[0, np.cumsum(Y_n_samps)]
+        YYs_stacked = np.empty(Y_N, dtype=float_t)
+        for i in range(Y_N):
+            YYs_stacked[i] = 0
+            for j in range(d):
+                YYs_stacked[i] += Y_stacked[i, j] ** 2
+
+    # allocate work buffer for each thread
+    cdef int max_pts = max(np.max(X_n_samps), np.max(Y_n_samps))
+    cdef floating[:, ::1] tmps = np.empty(
+            (n_jobs, max_pts * max_pts), dtype=float_t)
+
+    cdef floating[:, ::1] K = np.empty((X_n, Y_n), dtype=float_t)
+    cdef floating[::1] X_diag, Y_diag
+
+    cdef long num_main_jobs
+    cdef long[::1] main_job_is, main_job_js
+    if X_is_Y:  # only do the upper half of the array...
+        main_job_is, main_job_js = [
+                np.ascontiguousarray(a) for a in np.triu_indices(X_n)]
+        num_main_jobs = main_job_is.shape[0]
+    else:
+        num_main_jobs = X_n * Y_n
+
+    cdef long total_to_do = num_main_jobs
+    if not X_is_Y:
+        if get_X_diag:
+            X_diag = np.empty(X_n, dtype=float_t)
+            total_to_do += X_n
+        if get_Y_diag:
+            Y_diag = np.empty(Y_n, dtype=float_t)
+            total_to_do += Y_n
 
     cdef object pbar = log_progress
     cdef bint do_progress = bool(pbar)
@@ -57,96 +95,135 @@ cpdef _rbf_mmk(floating[:, ::1] stacked, int[::1] n_samps,
     cdef long[::1] num_done  # total things done by each thread
     if do_progress:
         num_done = np.zeros(n_jobs, dtype=np.int64)
-        pbar.start(total=n ** 2)
+        pbar.start(total=total_to_do)
 
+    cdef long job_idx, tid, i_start, i_end, j_start, j_end
+    cdef floating minus_gamma = -gamma
     with nogil:
-        for job_i in prange(n ** 2, num_threads=n_jobs, schedule='static'):
-            i = job_i // n
-            j = job_i % n
+        for job_idx in prange(total_to_do, num_threads=n_jobs,
+                              schedule='static'):
             tid = threadid()
-
-            i_start = bounds[i]
-            i_end = bounds[i + 1]
-            num_i = i_end - i_start
-
-            j_start = bounds[j]
-            j_end = bounds[j + 1]
-            num_j = j_end - j_start
-          
-            num_prod = num_i * num_j
-
             if tid == 0:
                 with gil:
                     PyErr_CheckSignals()  # allow ^C to interrupt us
                 if do_progress:
                     handle_pbar(pbar, jobs_since_last_tick, num_done)
 
-            # TODO: avoid code duplication here...
-            # TODO: support other kernels
-            # TODO: optional progress info like in skl-groups
-            if floating is float:
-                # put  X Y^T  into tmps
-                blas.sgemm('N', 'T', &num_i, &num_j, &d, &one_f,
-                           &stacked[i_start, 0], &num_i,
-                           &stacked[j_start, 0], &num_j,
-                           &zero_f, &tmps[tid, 0], &num_i)
-              
-                # scale by -2
-                blas.sscal(&num_prod, &minus_two_f, &tmps[tid, 0], &one_i)
-              
-                # add row norms - NOTE: not vectorized...
-                for k in range(num_i):
-                    for l in range(num_j):
-                        tmps[tid, k + num_i * l] += (
-                                XXs_stacked[i_start + k]
-                              + XXs_stacked[j_start + l])
-              
-                # scale by -gamma
-                blas.sscal(&num_prod, &minus_gamma, &tmps[tid, 0], &one_i)
-              
-                # exponentiate and mean - NOTE: not vectorized...
-                K[i, j] = 0
-                for k in range(num_i):
-                    for l in range(num_j):
-                        inc = expf(tmps[tid, k + num_i * l])
-                        K[i, j] += inc
-              
-                K[i, j] /= num_prod
+            if job_idx < num_main_jobs:
+                if X_is_Y:
+                    i = main_job_is[job_idx]
+                    j = main_job_js[job_idx]
+                else:
+                    i = job_idx // Y_n
+                    j = job_idx % Y_n
+                i_start = X_bounds[i]
+                i_end = X_bounds[i + 1]
+                j_start = Y_bounds[j]
+                j_end = Y_bounds[j + 1]
+
+                K[i, j] = _mean_rbf_kernel(
+                    X_stacked[i_start:i_end, :],
+                    Y_stacked[j_start:j_end, :],
+                    XXs_stacked[i_start:i_end],
+                    YYs_stacked[j_start:j_end],
+                    minus_gamma, tmps[tid, :])
+
+                if X_is_Y:
+                    K[j, i] = K[i, j]
+
             else:
-                # put  X Y^T  into tmps
-                blas.dgemm('N', 'T', &num_i, &num_j, &d, &one_f,
-                           &stacked[i_start, 0], &num_i,
-                           &stacked[j_start, 0], &num_j,
-                           &zero_f, &tmps[tid, 0], &num_i)
-              
-                # scale by -2
-                blas.dscal(&num_prod, &minus_two_f, &tmps[tid, 0], &one_i)
-              
-                # add row norms - NOTE: not vectorized...
-                for k in range(num_i):
-                    for l in range(num_j):
-                        tmps[tid, k + num_i * l] += (
-                                XXs_stacked[i_start + k]
-                              + XXs_stacked[j_start + l])
-              
-                # scale by -gamma
-                blas.dscal(&num_prod, &minus_gamma, &tmps[tid, 0], &one_i)
-              
-                # exponentiate and mean - NOTE: not vectorized...
-                K[i, j] = 0
-                for k in range(num_i):
-                    for l in range(num_j):
-                        inc = exp(tmps[tid, k + num_i * l])
-                        K[i, j] += inc
-              
-                K[i, j] /= num_prod
+                i = job_idx - num_main_jobs
+                if get_X_diag and i < X_n:
+                    i_start = X_bounds[i]
+                    i_end = X_bounds[i + 1]
+                    X_diag[i] = _mean_rbf_kernel(
+                        X_stacked[i_start:i_end, :],
+                        X_stacked[i_start:i_end, :],
+                        XXs_stacked[i_start:i_end],
+                        XXs_stacked[i_start:i_end],
+                        minus_gamma, tmps[tid, :])
+                else:
+                    if get_X_diag:
+                        i = i - X_n
+                    i_start = Y_bounds[i]
+                    i_end = Y_bounds[i + 1]
+                    Y_diag[i] = _mean_rbf_kernel(
+                        Y_stacked[i_start:i_end, :],
+                        Y_stacked[i_start:i_end, :],
+                        YYs_stacked[i_start:i_end],
+                        YYs_stacked[i_start:i_end],
+                        minus_gamma, tmps[tid, :])
 
             if do_progress:
                 num_done[tid] += 1
 
     if do_progress:
         pbar.finish()
-    return np.asarray(K)
+
+    if get_X_diag or get_Y_diag:
+        if X_is_Y:
+            X_diag = Y_diag = np.diagonal(K).copy()
+
+        ret = (np.asarray(K),)
+        if get_X_diag:
+            ret += (np.asarray(X_diag),)
+        if get_Y_diag:
+            ret += (np.asarray(Y_diag),)
+        return ret
+    else:
+        return np.asarray(K)
+
+
+@boundscheck(False)
+@wraparound(False)
+cdef floating _mean_rbf_kernel(
+            floating[:, ::1] X, floating[:, ::1] Y,
+            floating[::1] XX, floating[::1] YY,
+            floating minus_gamma, floating[::1] tmp) nogil:
+    cdef int num_X = X.shape[0], num_Y = Y.shape[0], dim = X.shape[1]
+    cdef int num_prod = num_X * num_Y
+    cdef floating one_f = 1, zero_f = 0, minus_two_f = -2
+    cdef int one_i = 1
+    cdef int i, j
+
+    # put  X Y^T  into tmp
+    if floating is float:
+        blas.sgemm('N', 'T', &num_X, &num_Y, &dim, &one_f,
+                   &X[0, 0], &num_X,
+                   &Y[0, 0], &num_Y,
+                   &zero_f, &tmp[0], &num_X)
+    else:
+        blas.dgemm('N', 'T', &num_X, &num_Y, &dim, &one_f,
+                   &X[0, 0], &num_X,
+                   &Y[0, 0], &num_Y,
+                   &zero_f, &tmp[0], &num_X)
+
+    # scale by -2
+    if floating is float:
+        blas.sscal(&num_prod, &minus_two_f, &tmp[0], &one_i)
+    else:
+        blas.dscal(&num_prod, &minus_two_f, &tmp[0], &one_i)
+
+    # add row norms - NOTE: not vectorized...
+    for i in range(num_X):
+        for j in range(num_Y):
+            tmp[i + num_X * j] += XX[i] + YY[j]
+
+    # scale by -gamma
+    if floating is float:
+        blas.sscal(&num_prod, &minus_gamma, &tmp[0], &one_i)
+    else:
+        blas.dscal(&num_prod, &minus_gamma, &tmp[0], &one_i)
+
+    # exponentiate and mean - NOTE: not vectorized...
+    cdef floating res = 0
+    for i in range(num_X):
+        for j in range(num_Y):
+            if floating is float:
+                res += expf(tmp[i + num_X * j])
+            else:
+                res += exp(tmp[i + num_X * j])
+    return res / num_prod
 
 
 @boundscheck(False)
