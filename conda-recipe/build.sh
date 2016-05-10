@@ -19,6 +19,6 @@ if [[ `uname` == Darwin ]]; then
         echo "'${dir[@]}'"
         exit 2
     fi
-    libgomp=$(otool -L $dir/_mmd.so | grep -Eo '[^[:space:]]*libgomp[^[:space:]]*')
-    install_name_tool -change "$libgomp" "$PREFIX/lib/$(basename $libgomp)" "$dir/_mmd.so"
+    libgomp=$(otool -L "$dir"/_mmd.*so | grep -Eo '[^[:space:]]*libgomp[^[:space:]]*')
+    install_name_tool -change "$libgomp" "$PREFIX/lib/$(basename $libgomp)" "$dir"/_mmd*.so
 fi
