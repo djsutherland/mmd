@@ -207,6 +207,8 @@ cdef void _mean_rbf_kernel(
 
     # do the rest of it
     # TODO: would explicitly vectorizing this help?
+    for k in range(n_gammas):
+        out[k] = 0
     for i in range(num_X):
         for j in range(num_Y):
             t = tmp[i + num_X * j] + XX[i] + YY[j]
