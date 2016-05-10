@@ -142,7 +142,8 @@ def _el_by_el_rbf_mmk(X, Y=None, gammas=1, get_X_diag=False, get_Y_diag=False,
 
 
 def rbf_mmd(X, Y=None, gammas=1, squared=False, n_jobs=1,
-            X_diag=None, Y_diag=None, method='el-by-el'):
+            X_diag=None, Y_diag=None, method='el-by-el',
+            ret_X_diag=False, ret_Y_diag=False):
     res = rbf_mmk(X, Y, gammas,
                   get_X_diag=X_diag is None, get_Y_diag=Y_diag is None,
                   n_jobs=n_jobs, method=method)
@@ -157,5 +158,14 @@ def rbf_mmd(X, Y=None, gammas=1, squared=False, n_jobs=1,
     K += Y_diag[..., None, :]
     if not squared:
         np.sqrt(K, out=K)
-    return K
+
+    if ret_X_diag or ret_Y_diag:
+        ret = (K,)
+        if ret_X_diag:
+            ret += (X_diag,)
+        if ret_Y_diag:
+            ret += (Y_diag,)
+        return ret
+    else:
+        return K
 
