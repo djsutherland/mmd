@@ -102,7 +102,7 @@ def _rbf_mmk(floating[:, ::1] X_stacked not None, int[::1] X_n_samps not None,
     cdef long job_idx, tid, i_start, i_end, j_start, j_end
     with nogil:
         for job_idx in prange(total_to_do, num_threads=n_jobs,
-                              schedule='static'):
+                              schedule='dynamic', chunksize=10):
             tid = threadid()
             if tid == 0:
                 with gil:
